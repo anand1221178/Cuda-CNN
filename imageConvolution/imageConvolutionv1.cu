@@ -27,10 +27,10 @@ const int mask_size = 3;
 // Forward declarations
 float runSerial(int argc, char **argv);
 float runGlobalCuda(int argc, char **argv);
+float runSharedCuda(int argc, char **argv);
 
 // Serial convolution implementation
-__host__ void serialConvolution(float* input, float* output, int width, int height, const int* mask, int mask_size)
-{
+__host__ void serialConvolution(float* input, float* output, int width, int height, const int* mask, int mask_size){
 	//1) find a and b -> in this case a=b since l x l images
 	int radius_lp = mask_size/2;
 
@@ -71,8 +71,7 @@ __host__ void serialConvolution(float* input, float* output, int width, int heig
 }
 
 // Cuda global memory implementation
-__global__ void globalMemconv(float* d_input_image, float* d_output_image, int width, int height, float* mask, int mask_size)
-{
+__global__ void globalMemConv(float* d_input_image, float* d_output_image, int width, int height, float* mask, int mask_size){
 	// Since we are using row major ordering
 	int idx_x = blockIdx.x * blockDim.x + threadIdx.x; //cols (X)
 	int idx_y = blockIdx.y * blockDim.y + threadIdx.y; //rows (y)
@@ -114,6 +113,85 @@ __global__ void globalMemconv(float* d_input_image, float* d_output_image, int w
 	}
 }
 
+// Cuda shared memory implementation
+__global__ void sharedMemConv(float* input, float* output, int width, int height, const float* mask, int mask_size){
+
+	// Setup shared memory for this tile of mask size, + thread block size
+	extern __shared__ float tile[];
+
+	// Thread x and y indexes within block
+	int tx = threadIdx.x;
+	int ty = threadIdx.y;
+
+	// Row major thread indexing nfor absolute position in image
+	int x = blockIdx.x * blockDim.x + threadIdx.x;
+	int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+	// Mask size used to deine padding around tile
+	int radius = mask_size/2;
+	
+	// Shared memory within the thread block is the thread block itself + the radius of the mask;
+	int shared_width = blockDim.x + 2 * radius;
+
+	// Index of shared threads in tiles + offset by radius since we want the center pixel but we have padding on the edges
+	int shared_x = tx + radius;
+	int shared_y = ty + radius;
+
+	// Load center pixel of each thread into shared memory
+	// Check if in bounds
+	if(x < width && y < height)
+	{
+		// Load into shared memory -> remember y * width + x for indexing in row major
+		tile[shared_y * shared_width + shared_x] = input[y * width + x];
+	}
+	else{
+		// Set to 0 else
+		tile[shared_y * shared_width + shared_x] = 0.0f;
+	}
+
+
+	if (tx < radius) {
+		// left border
+		int img_x = x - radius;
+		tile[shared_y * shared_width + tx] = (img_x >= 0 && y < height)
+											  ? input[y * width + img_x] : 0.0f;
+	
+		// right border
+		img_x = x + blockDim.x;
+		tile[shared_y * shared_width + (tx + blockDim.x + radius)] =
+			(img_x < width && y < height) ? input[y * width + img_x] : 0.0f;
+	}
+	
+	if (ty < radius) {
+		// top border
+		int img_y = y - radius;
+		tile[ty * shared_width + shared_x] = (x < width && img_y >= 0)
+											 ? input[img_y * width + x] : 0.0f;
+	
+		// bottom border
+		img_y = y + blockDim.y;
+		tile[(ty + blockDim.y + radius) * shared_width + shared_x] =
+			(x < width && img_y < height) ? input[img_y * width + x] : 0.0f;
+	}
+	
+
+	__syncthreads();
+	// Now do convolution
+    if (x < width && y < height) {
+        float sum = 0.0f;
+        for (int i = -radius; i <= radius; ++i) {
+            for (int j = -radius; j <= radius; ++j) {
+                float pixel = tile[(shared_y + i) * shared_width + (shared_x + j)];
+                float weight = mask[(i + radius) * mask_size + (j + radius)];
+                sum += pixel * weight;
+            }
+        }
+        if (sum < 0) sum = 0;
+        if (sum > 255) sum = 255;
+        output[y * width + x] = sum;
+    }
+
+}
 ////////////////////////////////////////////////////////////////////////////////
 // Program main
 ////////////////////////////////////////////////////////////////////////////////
@@ -131,21 +209,151 @@ int main(int argc, char **argv) {
 	}
 	}
 
-	float milliseconds_serial, milliseconds_cuda_global;
+	float milliseconds_serial, milliseconds_cuda_global, milliseconds_cuda_shared;
 
 	//Run the serial version
 	milliseconds_serial = runSerial(argc, argv);
 
 	milliseconds_cuda_global = runGlobalCuda(argc, argv);
 
+	milliseconds_cuda_shared = runSharedCuda(argc, argv);
+
+
+	printf("============================================\n");
+	printf("Timings:\n");
 	printf("Time taken serially: %f\n", milliseconds_serial);
 	printf("Time taken cuda globally : %f\n", milliseconds_cuda_global);
+	printf("Time take cuda shared : %f\n", milliseconds_cuda_shared);
 
+
+	printf("============================================\n");
+	printf("Speedups:\n");
 	printf("Speedup: serial vs cuda global memory: %fx\n", milliseconds_serial/milliseconds_cuda_global);
-
+	printf("Speedup: serial vs cuda shared memory: %fx\n", milliseconds_serial/milliseconds_cuda_shared);
+	printf("Speedup: cuda global memory vs cuda shared memory: %fx\n", milliseconds_cuda_global/milliseconds_cuda_shared);
+	printf("============================================\n");
 	return 0;
 
 }
+
+float runSharedCuda(int argc, char **argv){
+	// Define host input and output 
+	float *h_input_image = NULL;
+	float *h_output_image = NULL;
+	float *d_input_image = NULL;
+	float *d_output_image = NULL;
+
+	unsigned int width, height;
+
+	char *image_path = sdkFindFilePath(imageFilename, argv[0]);
+
+	if(image_path == NULL)
+	{
+		printf("Unable to find image file: %s\n", imageFilename);
+		exit(EXIT_FAILURE);
+	}
+	
+	sdkLoadPGM(image_path, &h_input_image, &width, &height);
+
+	// Allocate host output
+	h_output_image = (float *)malloc(sizeof(float) * width * height);
+
+	// Allocate device mem
+	checkCudaErrors(cudaMalloc((void **)&d_input_image, sizeof(float)* width * height));
+	checkCudaErrors(cudaMalloc((void **)&d_output_image, sizeof(float) * width * height));
+
+	// Copy input image from HOST to Device
+	checkCudaErrors(cudaMemcpy(d_input_image, h_input_image, sizeof(float) * height * width, cudaMemcpyHostToDevice));
+
+	// Define and copy mask
+	const float sharpen_mask[9] = {-1.0f,-1.0f,-1.0f,
+								   -1.0f, 9.0f,-1.0f,
+								   -1.0f,-1.0f,-1.0f}; 
+
+	float *d_mask = NULL;
+	checkCudaErrors(cudaMalloc((void **)&d_mask, sizeof(float) * mask_size * mask_size));
+	checkCudaErrors(cudaMemcpy(d_mask, sharpen_mask, sizeof(float) * mask_size * mask_size, cudaMemcpyHostToDevice));
+
+	// Select appropriate CUDA device
+	int devCount;
+	cudaGetDeviceCount(&devCount);
+
+	int selectedDevice = -1;
+	cudaDeviceProp devProp;
+
+	for (int i = 0; i < devCount; ++i) {
+		cudaGetDeviceProperties(&devProp, i);
+		if (!devProp.integrated) {
+			selectedDevice = i;
+			break;
+		}
+	}
+	if (selectedDevice == -1) {
+		fprintf(stderr, "No suitable CUDA device found!\n");
+		exit(EXIT_FAILURE);
+	}
+
+	cudaSetDevice(selectedDevice);
+	cudaGetDeviceProperties(&devProp, selectedDevice);
+
+	printf("Using GPU: %s\n", devProp.name);
+	printf("Max threads per block: %d\n", devProp.maxThreadsPerBlock);
+	printf("Max thread dimensions: %d x %d x %d\n", 
+			devProp.maxThreadsDim[0], devProp.maxThreadsDim[1], devProp.maxThreadsDim[2]);
+	printf("Max grid size: %d x %d x %d\n",
+			devProp.maxGridSize[0], devProp.maxGridSize[1], devProp.maxGridSize[2]);
+
+	// Launch configuration
+	dim3 threads_per_block(16, 16);
+	dim3 n_blocks(
+		(width  + threads_per_block.x - 1) / threads_per_block.x,
+		(height + threads_per_block.y - 1) / threads_per_block.y
+	);
+
+	// Create CUDA timers
+	cudaEvent_t start_shared, stop_shared;
+	cudaEventCreate(&start_shared);
+	cudaEventCreate(&stop_shared);
+
+	//Also pass the shared mem size
+	int radius = mask_size / 2;
+	int shared_mem_size = (threads_per_block.x + 2 * radius) * (threads_per_block.y + 2 * radius) * sizeof(float);
+
+	// Launch the kernel
+	cudaEventRecord(start_shared);
+	sharedMemConv<<<n_blocks, threads_per_block, shared_mem_size>>>(
+		d_input_image,
+		d_output_image,
+		width,
+		height,
+		d_mask,
+		mask_size
+	);
+	cudaEventRecord(stop_shared);
+
+	// Copy result back to host
+	checkCudaErrors(cudaMemcpy(h_output_image, d_output_image, sizeof(float) * height * width, cudaMemcpyDeviceToHost));
+
+	// Save output
+	sdkSavePGM("shared_output.pgm", h_output_image, width, height);
+	printf("Saved shared_output.pgm\n");
+
+	// Report timing
+	float milliseconds_shared = 0;
+	cudaEventSynchronize(stop_shared);
+	cudaEventElapsedTime(&milliseconds_shared, start_shared, stop_shared);
+
+	// Cleanup
+	free(h_output_image);
+	cudaFree(d_input_image);
+	cudaFree(d_output_image);
+	cudaFree(d_mask);
+	free(image_path);
+
+	return milliseconds_shared;
+}
+
+
 
 float runGlobalCuda(int argc, char **argv){
 	// Define host input and output 
@@ -234,7 +442,7 @@ float runGlobalCuda(int argc, char **argv){
 
 	cudaEventRecord(start_global);
 	// Kernal launch
-	globalMemconv<<<n_blocks, threads_per_block>>>(d_input_image, d_output_image, width, height, d_mask, mask_size);
+	globalMemConv<<<n_blocks, threads_per_block>>>(d_input_image, d_output_image, width, height, d_mask, mask_size);
 	cudaEventRecord(stop_global);
 	// Copy result back to host mem from device memory
 	checkCudaErrors(cudaMemcpy(h_output_image, d_output_image, sizeof(float) * height * width, cudaMemcpyDeviceToHost));
