@@ -21,6 +21,9 @@ const char *sampleName = "simpleTexture";
 // Define the files that are to be save and the reference images for validation
 const char *imageFilename = "teapot512.pgm";
 
+// Filters
+enum FilterType { SHARPEN = 0, AVERAGE = 1, EMBOSS = 2 };
+
 //define masks
 // 3x3
 const float sharpen3x3[9] = {-1, -1, -1, -1, 9, -1, -1, -1, -1};
@@ -76,9 +79,9 @@ const float emboss7x7[49] = {
 
 
 // Forward declarations
-float runSerial(int argc, char **argv, int selected_filter_type, int selected_mask_size);
-float runGlobalCuda(int argc, char **argv, int selected_filter_type, int selected_mask_size);
-float runSharedCuda(int argc, char **argv, int selected_filter_type, int selected_mask_size);
+float runSerial(int argc, char **argv, const float *selected_filter_type, int selected_mask_size);
+float runGlobalCuda(int argc, char **argv, const float *selected_filter_type, int selected_mask_size);
+float runSharedCuda(int argc, char **argv, const float *selected_filter_type, int selected_mask_size);
 
 // Serial convolution implementation
 __host__ void serialConvolution(float* input, float* output, int width, int height, const float* mask, int mask_size){
@@ -265,82 +268,98 @@ __global__ void sharedMemConv(float* input, float* output, int width, int height
     }
 
 }
+
+// Mask selector
+const float* getMask(FilterType filter, int mask_size) {
+    switch (mask_size) {
+        case 3:
+            if (filter == SHARPEN) return sharpen3x3;
+            if (filter == AVERAGE) return average3x3;
+            return emboss3x3;
+        case 5:
+            if (filter == SHARPEN) return sharpen5x5;
+            if (filter == AVERAGE) return average5x5;
+            return emboss5x5;
+        case 7:
+            if (filter == SHARPEN) return sharpen7x7;
+            if (filter == AVERAGE) return average7x7;
+            return emboss7x7;
+        default:
+            fprintf(stderr, "Unsupported mask size\n");
+            exit(EXIT_FAILURE);
+    }
+    return NULL;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Program main
 ////////////////////////////////////////////////////////////////////////////////
 int main(int argc, char **argv) {
 	printf("%s starting...\n", sampleName);
 
-	int selected_mask_size = 3; // default
-	int selected_filter_type = 0; // 0: sharpen, 1: emboss, 2: average
+	int mask_size = 3;
+    FilterType filter = SHARPEN;
+
 
 	// Process command-line arguments
 	if (argc > 1) {
-	if (checkCmdLineFlag(argc, (const char **)argv, "input")) {
-		getCmdLineArgumentString(argc, (const char **)argv, "input",
-								(char **)&imageFilename);
-	} else if (checkCmdLineFlag(argc, (const char **)argv, "reference")) {
-		printf("-reference flag should be used with -input flag");
-		exit(EXIT_FAILURE);
+		if (checkCmdLineFlag(argc, (const char **)argv, "input")) {
+			getCmdLineArgumentString(argc, (const char **)argv, "input",
+									(char **)&imageFilename);
+		} else if (checkCmdLineFlag(argc, (const char **)argv, "reference")) {
+			printf("-reference flag should be used with -input flag");
+			exit(EXIT_FAILURE);
+		}
 	}
-	if (checkCmdLineFlag(argc, (const char **)argv, "size"))
-    selected_mask_size = getCmdLineArgumentInt(argc, (const char **)argv, "size");
-	if (checkCmdLineFlag(argc, (const char **)argv, "filter"))
-		selected_filter_type = getCmdLineArgumentInt(argc, (const char **)argv, "filter");
-	}
+	// Set mask size
+	if (checkCmdLineFlag(argc, (const char **)argv, "mask")) {
+        mask_size = getCmdLineArgumentInt(argc, (const char **)argv, "mask");
+        if (mask_size != 3 && mask_size != 5 && mask_size != 7) {
+            fprintf(stderr, "Invalid mask size. Use -mask=3, 5 or 7\n");
+            return EXIT_FAILURE;
+        }
+    }
+	// Set filter type
+    if (checkCmdLineFlag(argc, (const char **)argv, "filter")) {
+        char *filter_arg;
+        getCmdLineArgumentString(argc, (const char **)argv, "filter", &filter_arg);
+        if (strcmp(filter_arg, "sharpen") == 0) {
+            filter = SHARPEN;
+        } else if (strcmp(filter_arg, "average") == 0) {
+            filter = AVERAGE;
+        } else if (strcmp(filter_arg, "emboss") == 0) {
+            filter = EMBOSS;
+        } else {
+            fprintf(stderr, "Invalid filter type. Use -filter=sharpen, average or emboss\n");
+            return EXIT_FAILURE;
+        }
+    }
 
+	const float* selected_mask = getMask(filter, mask_size);
 
-
-	float milliseconds_serial, milliseconds_cuda_global, milliseconds_cuda_shared;
-
-	//Run the serial version
-	milliseconds_serial = runSerial(argc, argv, selected_filter_type, selected_mask_size);
-
-	//Run the cuda version
-	milliseconds_cuda_global = runGlobalCuda(argc, argv, selected_filter_type, selected_mask_size);
-
-	//Run the cuda shared version
-	milliseconds_cuda_shared = runSharedCuda(argc, argv, selected_filter_type, selected_mask_size);
+	float t_serial = runSerial(argc, argv, selected_mask, mask_size);
+    float t_global = runGlobalCuda(argc, argv, selected_mask, mask_size);
+    float t_shared = runSharedCuda(argc, argv, selected_mask, mask_size);
 
 	// Print out the results
 	printf("============================================\n");
 	printf("Timings:\n");
-	printf("Time taken serially: %f\n", milliseconds_serial);
-	printf("Time taken cuda globally : %f\n", milliseconds_cuda_global);
-	printf("Time take cuda shared : %f\n", milliseconds_cuda_shared);
+	printf("Time taken serially: %f\n", t_serial);
+	printf("Time taken cuda globally : %f\n", t_global);
+	printf("Time take cuda shared : %f\n", t_shared);
 
 
 	printf("============================================\n");
 	printf("Speedups:\n");
-	printf("Speedup: serial vs cuda global memory: %fx\n", milliseconds_serial/milliseconds_cuda_global);
-	printf("Speedup: serial vs cuda shared memory: %fx\n", milliseconds_serial/milliseconds_cuda_shared);
-	printf("Speedup: cuda global memory vs cuda shared memory: %fx\n", milliseconds_cuda_global/milliseconds_cuda_shared);
+	printf("Speedup: serial vs cuda global memory: %fx\n", t_serial/t_global);
+	printf("Speedup: serial vs cuda shared memory: %fx\n", t_serial/t_shared);
+	printf("Speedup: cuda global memory vs cuda shared memory: %fx\n", t_global/t_shared);
 	printf("============================================\n");
 	return 0;
 
 }
 
-float runSharedCuda(int argc, char **argv, int filter_type, int mask_size){
-		// Check mask size first
-		const float *selected_mask = nullptr;
-
-		if (mask_size == 3) {
-			if (filter_type == 0) selected_mask = sharpen3x3;
-			else if (filter_type == 1) selected_mask = emboss3x3;
-			else selected_mask = average3x3;
-		} else if (mask_size == 5) {
-			if (filter_type == 0) selected_mask = sharpen5x5;
-			else if (filter_type == 1) selected_mask = emboss5x5;
-			else selected_mask = average5x5;
-		} else if (mask_size == 7) {
-			if (filter_type == 0) selected_mask = sharpen7x7;
-			else if (filter_type == 1) selected_mask = emboss7x7;
-			else selected_mask = average7x7;
-		} else {
-			printf("Unsupported mask size %d\n", mask_size);
-			exit(EXIT_FAILURE);
-		}
-
+float runSharedCuda(int argc, char **argv, const float *selected_mask, int mask_size){
 
 	// Define host input and output 
 	float *h_input_image = NULL;
@@ -455,30 +474,7 @@ float runSharedCuda(int argc, char **argv, int filter_type, int mask_size){
 
 
 
-float runGlobalCuda(int argc, char **argv, int filter_type, int mask_size){
-	// Check mask size first
-	const float *selected_mask = nullptr;
-
-	if (mask_size == 3) {
-		if (filter_type == 0) selected_mask = sharpen3x3;
-		else if (filter_type == 1) selected_mask = emboss3x3;
-		else selected_mask = average3x3;
-	} else if (mask_size == 5) {
-		if (filter_type == 0) selected_mask = sharpen5x5;
-		else if (filter_type == 1) selected_mask = emboss5x5;
-		else selected_mask = average5x5;
-	} else if (mask_size == 7) {
-		if (filter_type == 0) selected_mask = sharpen7x7;
-		else if (filter_type == 1) selected_mask = emboss7x7;
-		else selected_mask = average7x7;
-	} else {
-		printf("Unsupported mask size %d\n", mask_size);
-		exit(EXIT_FAILURE);
-	}
-
-
-
-
+float runGlobalCuda(int argc, char **argv, const float *selected_mask, int mask_size){
 	// Define host input and output 
 	float *h_input_image = NULL;
 	float *h_output_image = NULL;
@@ -583,27 +579,7 @@ float runGlobalCuda(int argc, char **argv, int filter_type, int mask_size){
 	return milliseconds_global;
 }
 
-float runSerial(int argc, char **argv, int filter_type, int mask_size){
-
-	// Check mask size first
-	const float *selected_mask = nullptr;
-
-	if (mask_size == 3) {
-		if (filter_type == 0) selected_mask = sharpen3x3;
-		else if (filter_type == 1) selected_mask = emboss3x3;
-		else selected_mask = average3x3;
-	} else if (mask_size == 5) {
-		if (filter_type == 0) selected_mask = sharpen5x5;
-		else if (filter_type == 1) selected_mask = emboss5x5;
-		else selected_mask = average5x5;
-	} else if (mask_size == 7) {
-		if (filter_type == 0) selected_mask = sharpen7x7;
-		else if (filter_type == 1) selected_mask = emboss7x7;
-		else selected_mask = average7x7;
-	} else {
-		printf("Unsupported mask size %d\n", mask_size);
-		exit(EXIT_FAILURE);
-	}
+float runSerial(int argc, char **argv, const float *selected_mask, int mask_size){
   // LOAD IMAGE
   
 	float *input_image = NULL;
