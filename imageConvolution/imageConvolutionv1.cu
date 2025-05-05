@@ -21,16 +21,67 @@ const char *sampleName = "simpleTexture";
 // Define the files that are to be save and the reference images for validation
 const char *imageFilename = "teapot512.pgm";
 
-// Define the size of the convolution mask
-const int mask_size = 3;
+//define masks
+// 3x3
+const float sharpen3x3[9] = {-1, -1, -1, -1, 9, -1, -1, -1, -1};
+const float average3x3[9] = {1/9.0f, 1/9.0f, 1/9.0f, 1/9.0f, 1/9.0f, 1/9.0f, 1/9.0f, 1/9.0f, 1/9.0f};
+const float emboss3x3[9] = {-2, -1, 0, -1, 1, 1, 0, 1, 2};
+
+// 5x5
+const float sharpen5x5[25] = {-1, -1, -1, -1, -1,
+								-1,  -1,  -1,  -1, -1,
+								-1,  -1,  9,  -1, -1,
+								-1,  -1,  -1,  -1, -1,
+								-1, -1, -1, -1, -1};
+
+const float average5x5[25] = { 1/25.0f, 1/25.0f, 1/25.0f, 1/25.0f, 1/25.0f,
+								1/25.0f, 1/25.0f, 1/25.0f, 1/25.0f, 1/25.0f,
+								1/25.0f, 1/25.0f, 1/25.0f, 1/25.0f, 1/25.0f,
+								1/25.0f, 1/25.0f, 1/25.0f, 1/25.0f, 1/25.0f,
+								1/25.0f, 1/25.0f, 1/25.0f, 1/25.0f, 1/25.0f};
+
+const float emboss5x5[25] = {
+						1, 0, 0, 0, 0,
+						0, 1, 0, 0, 0,
+						0, 0, 0, 0, 0,
+						0, 0, 0,-1, 0,
+						0, 0, 0, 0,-1
+					};
+
+// 7x7
+const float sharpen7x7[49] = {-1, -1, -1, -1, -1, -1, -1,
+								-1,  -1,  -1,  -1,  -1,  -1,  -1,
+								-1,  -1,  -1,  -1,  -1,  -1,  -1,
+								-1,  -1,  -1, 9.0f,  -1,  -1,  -1,
+								-1,  -1,  -1,  -1,  -1,  -1,  -1,
+								-1,  -1,  -1,  -1,  -1,  -1,  -1,
+								-1,-1,-1,-1,-1,-1,-1};
+
+const float average7x7[49] = {1/49.0f , 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f,
+								1/49.0f , 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f,
+								1/49.0f , 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f,
+								1/49.0f , 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f,
+								1/49.0f , 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f,
+								1/49.0f , 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f,
+								1/49.0f , 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f, 1/49.0f};
+const float emboss7x7[49] = {
+						1, 0, 0, 0, 0, 0, 0,
+						0, 1, 0, 0, 0, 0, 0,
+						0, 0, 1, 0, 0, 0, 0,
+						0, 0, 0,0, 0, 0, 0,
+						0, 0, 0, 0,-1, 0, 0,
+						0, 0, 0, 0, 0,-1, 0,
+						0, 0, 0, 0, 0, 0, -1
+					};
+
 
 // Forward declarations
-float runSerial(int argc, char **argv);
-float runGlobalCuda(int argc, char **argv);
-float runSharedCuda(int argc, char **argv);
+float runSerial(int argc, char **argv, int selected_filter_type, int selected_mask_size);
+float runGlobalCuda(int argc, char **argv, int selected_filter_type, int selected_mask_size);
+float runSharedCuda(int argc, char **argv, int selected_filter_type, int selected_mask_size);
 
 // Serial convolution implementation
-__host__ void serialConvolution(float* input, float* output, int width, int height, const int* mask, int mask_size){
+__host__ void serialConvolution(float* input, float* output, int width, int height, const float* mask, int mask_size){
 	//1) find a and b -> in this case a=b since l x l images
 	int radius_lp = mask_size/2;
 
@@ -57,7 +108,7 @@ __host__ void serialConvolution(float* input, float* output, int width, int heig
 					{
 						int maskIndex = (l + radius_lp) * mask_size + (p + radius_lp); //Since we store the mask as row vector 
 						float imagePixel = input[image_y * width + image_x]; //Simple idx'ng for 2D row major access
-						int kernelWeight = mask[maskIndex];
+						float kernelWeight = mask[maskIndex];
 						sum += imagePixel * kernelWeight;
 
 					}
@@ -173,6 +224,28 @@ __global__ void sharedMemConv(float* input, float* output, int width, int height
 		tile[(ty + blockDim.y + radius) * shared_width + shared_x] =
 			(x < width && img_y < height) ? input[img_y * width + x] : 0.0f;
 	}
+	if (tx < radius && ty < radius) {
+		// top-left
+		int img_x = x - radius;
+		int img_y = y - radius;
+		tile[ty * shared_width + tx] = (img_x >= 0 && img_y >= 0) ? input[img_y * width + img_x] : 0.0f;
+	
+		// top-right
+		img_x = x + blockDim.x;
+		img_y = y - radius;
+		tile[ty * shared_width + (tx + blockDim.x + radius)] = (img_x < width && img_y >= 0) ? input[img_y * width + img_x] : 0.0f;
+	
+		// bottom-left
+		img_x = x - radius;
+		img_y = y + blockDim.y;
+		tile[(ty + blockDim.y + radius) * shared_width + tx] = (img_x >= 0 && img_y < height) ? input[img_y * width + img_x] : 0.0f;
+	
+		// bottom-right
+		img_x = x + blockDim.x;
+		img_y = y + blockDim.y;
+		tile[(ty + blockDim.y + radius) * shared_width + (tx + blockDim.x + radius)] =
+			(img_x < width && img_y < height) ? input[img_y * width + img_x] : 0.0f;
+	}
 	
 
 	__syncthreads();
@@ -198,6 +271,9 @@ __global__ void sharedMemConv(float* input, float* output, int width, int height
 int main(int argc, char **argv) {
 	printf("%s starting...\n", sampleName);
 
+	int selected_mask_size = 3; // default
+	int selected_filter_type = 0; // 0: sharpen, 1: emboss, 2: average
+
 	// Process command-line arguments
 	if (argc > 1) {
 	if (checkCmdLineFlag(argc, (const char **)argv, "input")) {
@@ -207,18 +283,26 @@ int main(int argc, char **argv) {
 		printf("-reference flag should be used with -input flag");
 		exit(EXIT_FAILURE);
 	}
+	if (checkCmdLineFlag(argc, (const char **)argv, "size"))
+    selected_mask_size = getCmdLineArgumentInt(argc, (const char **)argv, "size");
+	if (checkCmdLineFlag(argc, (const char **)argv, "filter"))
+		selected_filter_type = getCmdLineArgumentInt(argc, (const char **)argv, "filter");
 	}
+
+
 
 	float milliseconds_serial, milliseconds_cuda_global, milliseconds_cuda_shared;
 
 	//Run the serial version
-	milliseconds_serial = runSerial(argc, argv);
+	milliseconds_serial = runSerial(argc, argv, selected_filter_type, selected_mask_size);
 
-	milliseconds_cuda_global = runGlobalCuda(argc, argv);
+	//Run the cuda version
+	milliseconds_cuda_global = runGlobalCuda(argc, argv, selected_filter_type, selected_mask_size);
 
-	milliseconds_cuda_shared = runSharedCuda(argc, argv);
+	//Run the cuda shared version
+	milliseconds_cuda_shared = runSharedCuda(argc, argv, selected_filter_type, selected_mask_size);
 
-
+	// Print out the results
 	printf("============================================\n");
 	printf("Timings:\n");
 	printf("Time taken serially: %f\n", milliseconds_serial);
@@ -236,7 +320,28 @@ int main(int argc, char **argv) {
 
 }
 
-float runSharedCuda(int argc, char **argv){
+float runSharedCuda(int argc, char **argv, int filter_type, int mask_size){
+		// Check mask size first
+		const float *selected_mask = nullptr;
+
+		if (mask_size == 3) {
+			if (filter_type == 0) selected_mask = sharpen3x3;
+			else if (filter_type == 1) selected_mask = emboss3x3;
+			else selected_mask = average3x3;
+		} else if (mask_size == 5) {
+			if (filter_type == 0) selected_mask = sharpen5x5;
+			else if (filter_type == 1) selected_mask = emboss5x5;
+			else selected_mask = average5x5;
+		} else if (mask_size == 7) {
+			if (filter_type == 0) selected_mask = sharpen7x7;
+			else if (filter_type == 1) selected_mask = emboss7x7;
+			else selected_mask = average7x7;
+		} else {
+			printf("Unsupported mask size %d\n", mask_size);
+			exit(EXIT_FAILURE);
+		}
+
+
 	// Define host input and output 
 	float *h_input_image = NULL;
 	float *h_output_image = NULL;
@@ -265,14 +370,9 @@ float runSharedCuda(int argc, char **argv){
 	// Copy input image from HOST to Device
 	checkCudaErrors(cudaMemcpy(d_input_image, h_input_image, sizeof(float) * height * width, cudaMemcpyHostToDevice));
 
-	// Define and copy mask
-	const float sharpen_mask[9] = {-1.0f,-1.0f,-1.0f,
-								   -1.0f, 9.0f,-1.0f,
-								   -1.0f,-1.0f,-1.0f}; 
-
 	float *d_mask = NULL;
 	checkCudaErrors(cudaMalloc((void **)&d_mask, sizeof(float) * mask_size * mask_size));
-	checkCudaErrors(cudaMemcpy(d_mask, sharpen_mask, sizeof(float) * mask_size * mask_size, cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMemcpy(d_mask, selected_mask, sizeof(float) * mask_size * mask_size, cudaMemcpyHostToDevice));
 
 	// Select appropriate CUDA device
 	int devCount;
@@ -355,7 +455,30 @@ float runSharedCuda(int argc, char **argv){
 
 
 
-float runGlobalCuda(int argc, char **argv){
+float runGlobalCuda(int argc, char **argv, int filter_type, int mask_size){
+	// Check mask size first
+	const float *selected_mask = nullptr;
+
+	if (mask_size == 3) {
+		if (filter_type == 0) selected_mask = sharpen3x3;
+		else if (filter_type == 1) selected_mask = emboss3x3;
+		else selected_mask = average3x3;
+	} else if (mask_size == 5) {
+		if (filter_type == 0) selected_mask = sharpen5x5;
+		else if (filter_type == 1) selected_mask = emboss5x5;
+		else selected_mask = average5x5;
+	} else if (mask_size == 7) {
+		if (filter_type == 0) selected_mask = sharpen7x7;
+		else if (filter_type == 1) selected_mask = emboss7x7;
+		else selected_mask = average7x7;
+	} else {
+		printf("Unsupported mask size %d\n", mask_size);
+		exit(EXIT_FAILURE);
+	}
+
+
+
+
 	// Define host input and output 
 	float *h_input_image = NULL;
 	float *h_output_image = NULL;
@@ -383,15 +506,10 @@ float runGlobalCuda(int argc, char **argv){
 
 	// Copy input image from HOST to Device
 	checkCudaErrors(cudaMemcpy(d_input_image, h_input_image, sizeof(float) * height * width, cudaMemcpyHostToDevice));
-
-
-	const float sharpen_mask[9] = {-1.0f,-1.0f,-1.0f,
-								-1.0f,9.0f,-1.0f,
-								-1.0f,-1.0f,-1.0f}; 
-
+	// copy mask
 	float *d_mask = NULL;
 	checkCudaErrors(cudaMalloc((void **)&d_mask, sizeof(float) * mask_size * mask_size));
-	checkCudaErrors(cudaMemcpy(d_mask, sharpen_mask, sizeof(float) * mask_size * mask_size, cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMemcpy(d_mask, selected_mask, sizeof(float) * mask_size * mask_size, cudaMemcpyHostToDevice));
 	// Kernal implementation -> for now assume 512 x 512 image
 	//!In future check how many SMs check how many blocks per sm and how many threads per SM then allocate
 	int devCount;
@@ -465,7 +583,27 @@ float runGlobalCuda(int argc, char **argv){
 	return milliseconds_global;
 }
 
-float runSerial(int argc, char **argv) {
+float runSerial(int argc, char **argv, int filter_type, int mask_size){
+
+	// Check mask size first
+	const float *selected_mask = nullptr;
+
+	if (mask_size == 3) {
+		if (filter_type == 0) selected_mask = sharpen3x3;
+		else if (filter_type == 1) selected_mask = emboss3x3;
+		else selected_mask = average3x3;
+	} else if (mask_size == 5) {
+		if (filter_type == 0) selected_mask = sharpen5x5;
+		else if (filter_type == 1) selected_mask = emboss5x5;
+		else selected_mask = average5x5;
+	} else if (mask_size == 7) {
+		if (filter_type == 0) selected_mask = sharpen7x7;
+		else if (filter_type == 1) selected_mask = emboss7x7;
+		else selected_mask = average7x7;
+	} else {
+		printf("Unsupported mask size %d\n", mask_size);
+		exit(EXIT_FAILURE);
+	}
   // LOAD IMAGE
   
 	float *input_image = NULL;
@@ -489,10 +627,6 @@ float runSerial(int argc, char **argv) {
 	// Define output image size of type float of width times height * size of single float
 	output_image = (float * )malloc(width * height * sizeof(float));
 
-	// example mask: has to be linear since we store in row major order
-	const int sharpen_mask[9] = {-1,-1,-1,
-								-1,9,-1,
-								-1,-1,-1}; 
 	// start timer
 	cudaEvent_t start, stop;
 	cudaEventCreate(&start);
@@ -501,7 +635,7 @@ float runSerial(int argc, char **argv) {
 
 	cudaEventRecord(start);
 	// Host function since we are running it on the CPU 
-	serialConvolution(input_image, output_image, width, height, sharpen_mask, mask_size);
+	serialConvolution(input_image, output_image, width, height, selected_mask, mask_size);
 	cudaEventRecord(stop);
 	cudaEventSynchronize(stop);
 
