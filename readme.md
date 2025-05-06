@@ -60,3 +60,8 @@ make clean && make
 
 - Input must be a grayscale `.pgm` image.
 - Make sure your system supports CUDA and has an NVIDIA GPU.
+
+---
+## 👨‍💻 Author
+
+Anand Patel
