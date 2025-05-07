@@ -9,7 +9,7 @@ TARGET = imageConvolution
 # Source files
 SRCS = imageConvolutionv1.cu
 
-# CUDA architecture (adjust if needed for your GPU)
+# CUDA architecture
 ARCH = -gencode arch=compute_61,code=sm_61
 
 # Includes (adjust if SDK helper headers are in a separate path)

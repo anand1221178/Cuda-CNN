@@ -16,11 +16,11 @@ make clean && make && ./imageConvolution -input=your_image.pgm -filter=TYPE -siz
 
 ### 🔧 Arguments
 
-| Flag      | Description                    | Values                     |
-|-----------|--------------------------------|----------------------------|
-| `-input`  | Path to `.pgm` grayscale image | e.g. `teapot512.pgm`       |
+| Flag      | Description                    | Values                          |
+|-----------|--------------------------------|---------------------------------|
+| `-input`  | Path to `.pgm` grayscale image | e.g. `teapot512.pgm`            |
 | `-filter` | Filter type                    | `sharpen`, `average`, `emboss` |
-| `-size`   | Mask size for the filter       | `3`, `5`, or `7`           |
+| `-size`   | Mask size for the filter       | `3`, `5`, or `7`                |
 
 ---
 
@@ -56,12 +56,26 @@ make clean && make
 
 ---
 
+## 🖥️ Running on Wits Cluster
+
+To run the CUDA program on the Wits cluster, use a job submission script. Ensure that `run_cuda.sh` is in the same directory as the `.cu` file and then run:
+
+```bash
+sbatch run_cuda.sh
+```
+
+Make sure the script correctly references your CUDA executable (e.g., `imageConvolution`) and sets the appropriate resource requests (e.g., GPU, time, memory).
+
+---
+
 ## 📂 Notes
 
 - Input must be a grayscale `.pgm` image.
 - Make sure your system supports CUDA and has an NVIDIA GPU.
+- The program uses CUDA C++ and must be compiled with `nvcc`.
 
 ---
+
 ## 👨‍💻 Author
 
 Anand Patel
