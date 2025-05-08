@@ -448,7 +448,9 @@ float runSharedCuda(int argc, char **argv, const float *selected_mask, int mask_
 		d_mask,
 		mask_size
 	);
+	cudaDeviceSynchronize();
 	cudaEventRecord(stop_shared);
+	cudaEventSynchronize(stop_shared);
 
 	// Copy result back to host
 	checkCudaErrors(cudaMemcpy(h_output_image, d_output_image, sizeof(float) * height * width, cudaMemcpyDeviceToHost));
@@ -557,7 +559,9 @@ float runGlobalCuda(int argc, char **argv, const float *selected_mask, int mask_
 	cudaEventRecord(start_global);
 	// Kernal launch
 	globalMemConv<<<n_blocks, threads_per_block>>>(d_input_image, d_output_image, width, height, d_mask, mask_size);
+	cudaDeviceSynchronize();
 	cudaEventRecord(stop_global);
+	cudaEventSynchronize(stop_global);
 	// Copy result back to host mem from device memory
 	checkCudaErrors(cudaMemcpy(h_output_image, d_output_image, sizeof(float) * height * width, cudaMemcpyDeviceToHost));
 
